@@ -1,0 +1,120 @@
+{
+  "symbol": "BTC",
+  "tickets": [
+    {
+      "idea": "Long Straddle",
+      "ticket": {
+        "strategy": "Long Straddle",
+        "symbol": "BTC",
+        "expiry": "2026-03-27",
+        "quantity": 0,
+        "legs": [
+          {
+            "side": "buy",
+            "type": "call",
+            "strike": 74000.0,
+            "expiry": "2026-03-27",
+            "premium_usd": 2601.59796,
+            "quantity": 0
+          },
+          {
+            "side": "buy",
+            "type": "put",
+            "strike": 74000.0,
+            "expiry": "2026-03-27",
+            "premium_usd": 2386.65112,
+            "quantity": 0
+          }
+        ],
+        "checklist": [
+          "Verify spread widths < 1% of spot",
+          "Confirm quote freshness < 30s",
+          "Confirm max loss within daily budget",
+          "Submit as defined-risk order"
+        ]
+      }
+    },
+    {
+      "idea": "Bull Call Spread",
+      "ticket": {
+        "strategy": "Bull Call Spread",
+        "symbol": "BTC",
+        "expiry": "2026-04-03",
+        "quantity": 0,
+        "legs": [
+          {
+            "side": "buy",
+            "type": "call",
+            "strike": 74000.0,
+            "expiry": "2026-04-03",
+            "premium_usd": 3320.1938090000003,
+            "quantity": 0
+          },
+          {
+            "side": "sell",
+            "type": "call",
+            "strike": 78000.0,
+            "expiry": "2026-04-03",
+            "premium_usd": 1663.794225,
+            "quantity": 0
+          }
+        ],
+        "checklist": [
+          "Verify spread widths < 1% of spot",
+          "Confirm quote freshness < 30s",
+          "Confirm max loss within daily budget",
+          "Submit as defined-risk order"
+        ]
+      }
+    },
+    {
+      "idea": "Iron Condor",
+      "ticket": {
+        "strategy": "Iron Condor",
+        "symbol": "BTC",
+        "expiry": "2026-04-03",
+        "quantity": 2,
+        "legs": [
+          {
+            "side": "buy",
+            "type": "put",
+            "strike": 68000.0,
+            "expiry": "2026-04-03",
+            "premium_usd": 1146.169355,
+            "quantity": 2
+          },
+          {
+            "side": "sell",
+            "type": "put",
+            "strike": 69000.0,
+            "expiry": "2026-04-03",
+            "premium_usd": 1360.613944,
+            "quantity": 2
+          },
+          {
+            "side": "sell",
+            "type": "call",
+            "strike": 76000.0,
+            "expiry": "2026-04-03",
+            "premium_usd": 2366.28512,
+            "quantity": 2
+          },
+          {
+            "side": "buy",
+            "type": "call",
+            "strike": 77000.0,
+            "expiry": "2026-04-03",
+            "premium_usd": 1996.5530700000002,
+            "quantity": 2
+          }
+        ],
+        "checklist": [
+          "Verify spread widths < 1% of spot",
+          "Confirm quote freshness < 30s",
+          "Confirm max loss within daily budget",
+          "Submit as defined-risk order"
+        ]
+      }
+    }
+  ]
+}

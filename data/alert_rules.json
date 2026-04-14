@@ -1,0 +1,31 @@
+{
+  "rules": [
+    {
+      "id": "flip_cross",
+      "type": "flip_cross",
+      "enabled": true,
+      "severity": "medium"
+    },
+    {
+      "id": "net_gex_threshold",
+      "type": "net_gex_threshold",
+      "enabled": true,
+      "severity": "high",
+      "threshold": 10000000000,
+      "direction": "abs"
+    },
+    {
+      "id": "oi_wall_shift",
+      "type": "oi_wall_shift",
+      "enabled": true,
+      "severity": "medium",
+      "min_shift_pct": 0.03
+    },
+    {
+      "id": "vol_regime_change",
+      "type": "vol_regime_change",
+      "enabled": true,
+      "severity": "low"
+    }
+  ]
+}

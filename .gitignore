@@ -1,0 +1,4 @@
+# Secrets
+data/telegram_token.txt
+data/strategy_suite_saved.json
+.env

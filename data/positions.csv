@@ -1,0 +1,4 @@
+symbol,expiry,strike,type,quantity,avg_price
+BTC,2026-04-26,80000,call,2,3500
+BTC,2026-04-26,65000,put,-1,2900
+ETH,2026-05-31,4500,call,3,520
