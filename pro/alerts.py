@@ -37,10 +37,10 @@ def load_rules(path: Optional[Path]) -> List[Dict[str, Any]]:
         rules = payload.get("rules") if isinstance(payload, dict) else None
         if isinstance(rules, list) and rules:
             return rules
-    except OSError:
-        pass
-    except json.JSONDecodeError:
-        pass
+    except OSError as exc:
+        print(f"[alerts] cannot read rules {path}: {exc}; using defaults")
+    except json.JSONDecodeError as exc:
+        print(f"[alerts] malformed rules JSON {path}: {exc}; using defaults")
     return DEFAULT_RULES
 
 

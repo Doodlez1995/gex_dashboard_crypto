@@ -20,8 +20,8 @@ def run_collection():
                 row_count=len(df_symbol),
                 unique_strikes=int(df_symbol["strike"].nunique()),
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[collector] metric write failed: {exc}")
     return df_out
 
 

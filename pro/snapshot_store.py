@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import sys
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Set
 
@@ -11,13 +12,70 @@ import pandas as pd
 # and re-issued the full schema DDL.
 _INIT_DONE: Set[str] = set()
 
+# Per-process set of db paths whose journal_mode has been verified as WAL.
+# `PRAGMA journal_mode=WAL` is a persistent change in the DB header, so once
+# it succeeds for a given file we never need to re-run it — but we do want to
+# notice (and log) if the initial switch didn't take effect.
+_WAL_DONE: Set[str] = set()
+
+
+def _ensure_wal(db_path: Path) -> None:
+    """Persistently switch the DB to WAL journal mode exactly once.
+
+    Runs in a short-lived autocommit connection so no implicit transaction
+    can wrap the PRAGMA. If WAL fails to engage (e.g. another connection
+    holds the DB), falls back to DELETE but at least warns to stderr so the
+    cause of any subsequent "database is locked" is visible.
+    """
+    key = str(Path(db_path).resolve())
+    if key in _WAL_DONE:
+        return
+    try:
+        setup = sqlite3.connect(db_path, timeout=30, isolation_level=None)
+    except sqlite3.Error as exc:  # pragma: no cover - defensive
+        print(f"[snapshot_store] WAL setup: connect failed: {exc}", file=sys.stderr)
+        return
+    try:
+        setup.execute("PRAGMA busy_timeout=30000")
+        row = setup.execute("PRAGMA journal_mode=WAL").fetchone()
+        mode = (row[0] if row else "").lower()
+        if mode != "wal":
+            print(
+                f"[snapshot_store] warning: journal_mode is {mode!r}, expected 'wal' "
+                "(another process may be holding the DB)",
+                file=sys.stderr,
+            )
+        setup.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        setup.close()
+    _WAL_DONE.add(key)
+
+
+def _connect(db_path: Path, timeout: float = 30.0) -> sqlite3.Connection:
+    """Open a sqlite connection configured for concurrent LAN access.
+
+    The collector thread and Dash request handlers both hit this DB from
+    separate connections. Without WAL mode, any writer blocks every reader
+    and sqlite3 raises "database is locked" almost immediately. WAL (set
+    once via `_ensure_wal`) lets readers proceed against the last committed
+    snapshot while a writer is active. `busy_timeout` makes writer/writer
+    collisions wait-and-retry for up to 30s instead of failing fast.
+    """
+    _ensure_wal(db_path)
+    con = sqlite3.connect(db_path, timeout=timeout)
+    # busy_timeout is a per-connection setting and must be re-applied on
+    # every open. Set it FIRST so it's active for any subsequent PRAGMA
+    # or query that might hit contention.
+    con.execute("PRAGMA busy_timeout=30000")
+    return con
+
 
 def init_db(db_path: Path, force: bool = False) -> None:
     key = str(Path(db_path).resolve())
     if not force and key in _INIT_DONE:
         return
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(db_path, timeout=10)
+    con = _connect(db_path)
     try:
         con.execute(
             """
@@ -102,7 +160,7 @@ def write_snapshot(db_path: Path, df: pd.DataFrame, ts_utc: Optional[pd.Timestam
     out["abs_gex"] = out["call_gex"].abs() + out["put_gex"].abs()
     cols = ["ts_utc", "symbol", "expiry", "strike", "call_gex", "put_gex", "spot_price", "total_gex", "abs_gex"]
     rows = list(out[cols].itertuples(index=False, name=None))
-    con = sqlite3.connect(db_path, timeout=10)
+    con = _connect(db_path)
     try:
         # INSERT OR IGNORE so the (ts_utc, symbol, expiry, strike) unique index
         # silently drops duplicate rows from concurrent writers instead of
@@ -121,7 +179,7 @@ def write_snapshot(db_path: Path, df: pd.DataFrame, ts_utc: Optional[pd.Timestam
 def write_metric(db_path: Path, symbol: str, net_gex: float, row_count: int, unique_strikes: int, ts_utc: Optional[pd.Timestamp] = None) -> None:
     init_db(db_path)
     ts = ts_utc or pd.Timestamp.now(tz="UTC")
-    con = sqlite3.connect(db_path, timeout=10)
+    con = _connect(db_path)
     try:
         con.execute(
             "INSERT OR IGNORE INTO gex_metrics (ts_utc, symbol, net_gex, row_count, unique_strikes) "
@@ -136,7 +194,7 @@ def write_metric(db_path: Path, symbol: str, net_gex: float, row_count: int, uni
 def load_metric_history(db_path: Path, symbol: str, limit: int = 200) -> pd.DataFrame:
     if not db_path.exists():
         return pd.DataFrame()
-    con = sqlite3.connect(db_path)
+    con = _connect(db_path)
     try:
         q = """
             SELECT ts_utc, symbol, net_gex, row_count, unique_strikes
@@ -157,7 +215,7 @@ def load_metric_history(db_path: Path, symbol: str, limit: int = 200) -> pd.Data
 def load_snapshot_timeseries(db_path: Path, symbol: str, limit: int = 400) -> pd.DataFrame:
     if not db_path.exists():
         return pd.DataFrame()
-    con = sqlite3.connect(db_path)
+    con = _connect(db_path)
     try:
         q = """
             WITH recent_ts AS (
@@ -186,7 +244,7 @@ def load_snapshot_timeseries(db_path: Path, symbol: str, limit: int = 400) -> pd
 def load_snapshot_range(db_path: Path, symbol: str, start_ts: Optional[pd.Timestamp], end_ts: Optional[pd.Timestamp]) -> pd.DataFrame:
     if not db_path.exists():
         return pd.DataFrame()
-    con = sqlite3.connect(db_path)
+    con = _connect(db_path)
     try:
         q = """
             SELECT ts_utc, symbol, expiry, strike, call_gex, put_gex, spot_price, total_gex, abs_gex
@@ -218,7 +276,7 @@ def load_snapshot_range(db_path: Path, symbol: str, start_ts: Optional[pd.Timest
 def load_snapshot_at(db_path: Path, symbol: str, ts_utc: str) -> pd.DataFrame:
     if not db_path.exists() or not ts_utc:
         return pd.DataFrame()
-    con = sqlite3.connect(db_path)
+    con = _connect(db_path)
     try:
         q = """
             SELECT ts_utc, symbol, expiry, strike, call_gex, put_gex, spot_price, total_gex, abs_gex
@@ -245,7 +303,7 @@ def load_snapshot_timestamps(
 ) -> List[str]:
     if not db_path.exists():
         return []
-    con = sqlite3.connect(db_path)
+    con = _connect(db_path)
     try:
         q = """
             SELECT ts_utc
@@ -295,7 +353,7 @@ def write_alert(
             }
         ]
     )
-    con = sqlite3.connect(db_path)
+    con = _connect(db_path)
     try:
         row.to_sql("gex_alerts", con, if_exists="append", index=False)
     finally:
@@ -311,7 +369,7 @@ def load_alerts(
 ) -> pd.DataFrame:
     if not db_path.exists():
         return pd.DataFrame()
-    con = sqlite3.connect(db_path)
+    con = _connect(db_path)
     try:
         q = "SELECT id, ts_utc, symbol, rule_id, severity, message, payload, ack FROM gex_alerts WHERE 1=1"
         params: List[Any] = []
@@ -338,7 +396,7 @@ def load_alerts(
 def ack_alerts(db_path: Path, symbol: Optional[str] = None) -> int:
     if not db_path.exists():
         return 0
-    con = sqlite3.connect(db_path)
+    con = _connect(db_path)
     try:
         if symbol:
             res = con.execute("UPDATE gex_alerts SET ack = 1 WHERE symbol = ? AND ack = 0", [symbol])
@@ -353,7 +411,7 @@ def ack_alerts(db_path: Path, symbol: Optional[str] = None) -> int:
 def get_last_alert_ts(db_path: Path, symbol: str, rule_id: str) -> Optional[pd.Timestamp]:
     if not db_path.exists():
         return None
-    con = sqlite3.connect(db_path)
+    con = _connect(db_path)
     try:
         row = con.execute(
             "SELECT ts_utc FROM gex_alerts WHERE symbol = ? AND rule_id = ? ORDER BY ts_utc DESC LIMIT 1",
@@ -369,7 +427,7 @@ def get_last_alert_ts(db_path: Path, symbol: str, rule_id: str) -> Optional[pd.T
 def load_latest_metric(db_path: Path, symbol: str) -> Optional[Dict[str, Any]]:
     if not db_path.exists():
         return None
-    con = sqlite3.connect(db_path)
+    con = _connect(db_path)
     try:
         row = con.execute(
             "SELECT ts_utc, net_gex, row_count, unique_strikes FROM gex_metrics WHERE symbol = ? ORDER BY ts_utc DESC LIMIT 1",

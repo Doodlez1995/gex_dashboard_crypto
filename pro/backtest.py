@@ -17,8 +17,12 @@ class BacktestResult:
 
 
 def _max_drawdown(equity_curve: pd.Series) -> float:
+    if equity_curve.empty:
+        return 0.0
     running_max = equity_curve.cummax()
-    dd = (equity_curve - running_max) / running_max.replace(0, 1)
+    safe_max = running_max.where(running_max > 0)
+    dd = (equity_curve - running_max) / safe_max
+    dd = dd.dropna()
     return float(dd.min()) if not dd.empty else 0.0
 
 

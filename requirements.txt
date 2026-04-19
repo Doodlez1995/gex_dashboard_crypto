@@ -1,6 +1,10 @@
+bokeh
 dash
-plotly
-pandas
-requests
-pytest
 kaleido
+numpy
+pandas
+plotly
+requests
+
+# dev / test
+pytest

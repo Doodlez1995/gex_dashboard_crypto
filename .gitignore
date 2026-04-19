@@ -1,4 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
 # Secrets
 data/telegram_token.txt
 data/strategy_suite_saved.json
-.env
+
+# Data / databases
+data/gex_snapshots.db
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Misc
+*.log

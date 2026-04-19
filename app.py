@@ -67,6 +67,7 @@ from pro.strategy_suite import (
 )
 from pro.strategies import generate_professional_ideas
 from pro.backtest import run_walk_forward_backtest
+from pro.options_backtest import run_options_backtest, suggest_next_trade, STRATEGY_TYPES, CYCLE_TYPES, DEFAULT_DELTAS
 from pro.cache import TTLCache
 from pro.deribit_client import DeribitClient
 from pro.volatility import estimate_term_iv, classify_vol_regime
@@ -482,7 +483,8 @@ a {
 .heatmap-panel-shell,
 .alerts-panel-shell,
 .portfolio-panel-shell,
-.ops-panel-shell {
+.ops-panel-shell,
+.options-backtest-panel-shell {
     position: relative;
 }
 .levels-panel-shell {
@@ -499,7 +501,8 @@ a {
 .ops-panel-shell {
     grid-column: span 6;
 }
-.portfolio-panel-shell {
+.portfolio-panel-shell,
+.options-backtest-panel-shell {
     grid-column: span 12;
 }
 .levels-panel-shell,
@@ -514,7 +517,8 @@ a {
 .heatmap-panel-shell::before,
 .alerts-panel-shell::before,
 .portfolio-panel-shell::before,
-.ops-panel-shell::before {
+.ops-panel-shell::before,
+.options-backtest-panel-shell::before {
     content: "";
     position: absolute;
     top: 0;
@@ -531,6 +535,20 @@ a {
 .alerts-panel-shell::before { background: rgba(232, 169, 59, 0.6); }
 .portfolio-panel-shell::before { background: rgba(19, 185, 85, 0.55); }
 .ops-panel-shell::before { background: rgba(91, 141, 234, 0.55); }
+.options-backtest-panel-shell::before { background: rgba(192, 132, 252, 0.6); }
+.options-backtest-panel-shell {
+    height: auto;
+    overflow: visible;
+}
+.options-backtest-panel-shell .sidebar-body {
+    display: block;
+    padding: 12px 16px;
+}
+.options-backtest-panel-shell .dash-graph {
+    width: 100%;
+    min-height: 0;
+    height: auto;
+}
 .panel-head {
     display: flex;
     justify-content: space-between;
@@ -1661,7 +1679,8 @@ a {
     .heatmap-panel-shell,
     .alerts-panel-shell,
     .ops-panel-shell,
-    .portfolio-panel-shell {
+    .portfolio-panel-shell,
+    .options-backtest-panel-shell {
         grid-column: span 2;
     }
 }
@@ -1729,9 +1748,13 @@ a {
     .alerts-panel-shell,
     .portfolio-panel-shell,
     .ops-panel-shell,
-    .strategy-suite-panel-shell {
+    .strategy-suite-panel-shell,
+    .options-backtest-panel-shell {
         grid-column: span 1;
         grid-row: span 1;
+    }
+    .backtest-controls {
+        grid-template-columns: 1fr 1fr !important;
     }
     .chart-type-field,
     .chart-metrics-field,
@@ -2227,6 +2250,7 @@ a {
     height: 12px;
     background: var(--bbg-line-strong);
 }
+
 """
 PLOT_PAPER_BG = "rgba(0, 0, 0, 0)"
 PLOT_PANEL_BG = "rgba(30, 34, 53, 0.95)"
@@ -2523,8 +2547,8 @@ def get_latest_data():
         df_all = load_data()
         _DATA_CACHE["mtime"] = current_mtime
         _DATA_CACHE["df"] = df_all
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[data] load_data failed, serving stale cache: {exc}")
     return df_all
 
 
@@ -4882,6 +4906,7 @@ app.layout = html.Div(
         dcc.Store(id="workspace-store", storage_type="local", data={}),
         dcc.Store(id="replay-scale-store", data={}),
         dcc.Store(id="strategy-suite-chain-store", data=[]),
+        dcc.Store(id="bt-next-trade-store", data={}),
         dcc.Store(
             id="strategy-suite-builder-store",
             data={"symbol": "BTC", "template": "long_call", "commission": DEFAULT_COMMISSION_PER_CONTRACT, "eval_days": 7, "legs": []},
@@ -4953,12 +4978,23 @@ app.layout = html.Div(
                 ),
                 html.Div(className="toolbar-sep"),
                 html.Button(
+                    id="tb-backtest",
+                    className="tb-btn",
+                    children=[
+                        html.Span("\u23f1", className="tb-icon"),
+                        html.Span("Backtest", className="tb-label"),
+                        html.Span("5", className="tb-key"),
+                    ],
+                    n_clicks=0,
+                ),
+                html.Div(className="toolbar-sep"),
+                html.Button(
                     id="tb-ops",
                     className="tb-btn",
                     children=[
                         html.Span("\u2699", className="tb-icon"),
                         html.Span("Data Ops", className="tb-label"),
-                        html.Span("5", className="tb-key"),
+                        html.Span("6", className="tb-key"),
                     ],
                     n_clicks=0,
                 ),
@@ -5859,6 +5895,315 @@ app.layout = html.Div(
                 ),
                     ],
                 ),
+                # ══ PAGE: Options Backtest ══
+                html.Div(
+                    id="page-backtest",
+                    className="page-group",
+                    children=[
+                html.Div("Options Selling Backtest", className="section-label"),
+                html.Div(
+                    id="section-options-backtest",
+                    className="panel options-backtest-panel-shell",
+                    children=[
+                        html.Div(
+                            className="panel-head",
+                            children=[
+                                html.Div(
+                                    className="panel-head-copy",
+                                    children=[
+                                        html.H3("Options Selling Backtest", className="panel-title"),
+                                        html.Span("Test strategies on BTC & ETH with historical Friday 08:00 UTC settlement", className="panel-subtitle"),
+                                    ],
+                                ),
+                            ],
+                        ),
+                        html.Div(
+                            className="sidebar-body",
+                            children=[
+                                # Controls row
+                                html.Div(
+                                    className="backtest-controls",
+                                    style={"display": "grid", "gridTemplateColumns": "repeat(7, 1fr)", "gap": "10px", "marginBottom": "12px"},
+                                    children=[
+                                        html.Div([
+                                            html.Div("Asset", className="control-label"),
+                                            dcc.Dropdown(
+                                                id="bt-symbol",
+                                                options=[{"label": "BTC", "value": "BTC"}, {"label": "ETH", "value": "ETH"}],
+                                                value="BTC",
+                                                clearable=False,
+                                            ),
+                                        ], className="control-stack"),
+                                        html.Div([
+                                            html.Div("Strategy", className="control-label"),
+                                            dcc.Dropdown(
+                                                id="bt-strategy",
+                                                options=[
+                                                    {"label": "Short Put", "value": "short_put"},
+                                                    {"label": "Cash-Secured Put", "value": "cash_secured_put"},
+                                                    {"label": "Short Call", "value": "short_call"},
+                                                    {"label": "Short Strangle", "value": "short_strangle"},
+                                                    {"label": "Iron Condor", "value": "iron_condor"},
+                                                    {"label": "Covered Call", "value": "covered_call"},
+                                                    {"label": "Covered Put", "value": "covered_put"},
+                                                ],
+                                                value="short_put",
+                                                clearable=False,
+                                            ),
+                                        ], className="control-stack"),
+                                        html.Div([
+                                            html.Div("Cycle", className="control-label"),
+                                            dcc.Dropdown(
+                                                id="bt-cycle",
+                                                options=[
+                                                    {"label": "Weekly", "value": "weekly"},
+                                                    {"label": "Monthly", "value": "monthly"},
+                                                ],
+                                                value="weekly",
+                                                clearable=False,
+                                            ),
+                                        ], className="control-stack"),
+                                        html.Div([
+                                            html.Div("Delta", className="control-label"),
+                                            dcc.Dropdown(
+                                                id="bt-delta",
+                                                options=[{"label": f"{d:.0%}", "value": d} for d in DEFAULT_DELTAS],
+                                                value=0.15,
+                                                clearable=False,
+                                            ),
+                                        ], className="control-stack"),
+                                        html.Div([
+                                            html.Div("Lookback (days)", className="control-label"),
+                                            dcc.Dropdown(
+                                                id="bt-days",
+                                                options=[
+                                                    {"label": "180d", "value": 180},
+                                                    {"label": "365d", "value": 365},
+                                                    {"label": "730d (2y)", "value": 730},
+                                                ],
+                                                value=365,
+                                                clearable=False,
+                                            ),
+                                        ], className="control-stack"),
+                                        html.Div([
+                                            html.Div("Capital ($)", className="control-label"),
+                                            dcc.Input(
+                                                id="bt-capital",
+                                                type="number",
+                                                value=100000,
+                                                min=1000,
+                                                step=1000,
+                                                style={"width": "100%", "background": "#1a1a2e", "color": "#e0e0e0", "border": "1px solid #333", "borderRadius": "4px", "padding": "6px"},
+                                            ),
+                                        ], className="control-stack"),
+                                        html.Div([
+                                            html.Div("Reinvest", className="control-label"),
+                                            dcc.Checklist(
+                                                id="bt-reinvest",
+                                                options=[{"label": " Compound premiums", "value": "yes"}],
+                                                value=[],
+                                                style={"color": "#e0e0e0", "fontSize": "12px", "paddingTop": "6px"},
+                                            ),
+                                        ], className="control-stack"),
+                                    ],
+                                ),
+                                # Run button
+                                html.Div(
+                                    style={"marginBottom": "16px"},
+                                    children=[
+                                        html.Button("Run Backtest", id="bt-run-btn", className="action-button", n_clicks=0),
+                                        dcc.Loading(
+                                            id="bt-loading",
+                                            type="circle",
+                                            children=[html.Div(id="bt-status", className="panel-subtitle", style={"marginTop": "8px"})],
+                                        ),
+                                    ],
+                                ),
+                                # Stats cards
+                                html.Div(id="bt-stats-cards", style={"marginBottom": "16px"}),
+                                # Equity curve chart
+                                dcc.Graph(
+                                    id="bt-equity-chart",
+                                    style={"width": "100%", "height": "350px"},
+                                    config={"displayModeBar": False},
+                                    figure={"data": [], "layout": {"template": "plotly_dark", "paper_bgcolor": "#0d0d1a", "plot_bgcolor": "#0d0d1a", "height": 350, "xaxis": {"visible": False}, "yaxis": {"visible": False}, "annotations": [{"text": "Click 'Run Backtest' to generate equity curve", "xref": "paper", "yref": "paper", "x": 0.5, "y": 0.5, "showarrow": False, "font": {"size": 14, "color": "#555"}}]}},
+                                ),
+                                # PnL per trade chart
+                                dcc.Graph(
+                                    id="bt-pnl-chart",
+                                    style={"width": "100%", "height": "300px", "marginTop": "12px"},
+                                    config={"displayModeBar": False},
+                                    figure={"data": [], "layout": {"template": "plotly_dark", "paper_bgcolor": "#0d0d1a", "plot_bgcolor": "#0d0d1a", "height": 300, "xaxis": {"visible": False}, "yaxis": {"visible": False}, "annotations": [{"text": "PnL per trade will appear here", "xref": "paper", "yref": "paper", "x": 0.5, "y": 0.5, "showarrow": False, "font": {"size": 14, "color": "#555"}}]}},
+                                ),
+                                # Next trade idea
+                                html.Div(
+                                    id="bt-next-trade",
+                                    style={"marginTop": "16px"},
+                                ),
+                                # Trade log table
+                                html.Div(
+                                    id="bt-trade-log",
+                                    style={"marginTop": "16px", "maxHeight": "400px", "overflowY": "auto"},
+                                ),
+                                # ── Strategy Manual ──
+                                html.Details(
+                                    style={"marginTop": "24px", "borderTop": "1px solid #333", "paddingTop": "16px"},
+                                    open=False,
+                                    children=[
+                                        html.Summary(
+                                            "Strategy Manual",
+                                            style={"cursor": "pointer", "fontSize": "15px", "fontWeight": "bold", "color": "#c084fc", "marginBottom": "12px"},
+                                        ),
+                                        html.Div(
+                                            style={"fontSize": "12px", "lineHeight": "1.7", "color": "#ccc"},
+                                            children=[
+                                                # ── General concepts ──
+                                                html.H4("Key Concepts", style={"color": "#60a5fa", "margin": "0 0 8px 0", "fontSize": "13px"}),
+                                                html.P([
+                                                    html.Strong("Delta"), " measures how much an option's price moves per $1 move in the underlying. ",
+                                                    "For sellers, delta represents the approximate probability that the option expires in-the-money. ",
+                                                    "A ", html.Strong("30\u0394 (0.30)"), " call has roughly a 30% chance of expiring ITM \u2014 or a 70% chance of expiring worthless (profitable for the seller).",
+                                                ]),
+                                                html.P([
+                                                    html.Strong("Settlement:"), " All trades settle at ", html.Strong("Friday 08:00 UTC"),
+                                                    " (Deribit expiry convention). Weekly = every Friday; Monthly = last Friday of the month.",
+                                                ]),
+                                                html.P([
+                                                    html.Strong("Reinvest Premiums:"), " When checked, position size scales with your current equity. ",
+                                                    "If your account grew 10%, you sell 1.1\u00d7 contracts \u2014 compounding gains (and losses).",
+                                                ]),
+                                                html.Hr(style={"borderColor": "#333", "margin": "16px 0"}),
+                                                # ── Short Put ──
+                                                html.H4("Short Put", style={"color": "#4ade80", "margin": "0 0 6px 0", "fontSize": "13px"}),
+                                                html.P([
+                                                    "Sell an OTM put at your target delta. You collect premium upfront and profit if the price ",
+                                                    "stays above the strike at expiry. ",
+                                                    html.Strong("Risk:"), " if the underlying drops below the strike, you lose strike \u2212 settlement (minus the premium cushion).",
+                                                ]),
+                                                html.Div([
+                                                    html.Strong("Example \u2014 BTC Short Put, 15\u0394, weekly:"),
+                                                    html.Br(),
+                                                    "BTC = $95,000. You sell the $88,500 put (15\u0394) for ~$420. ",
+                                                    "If BTC is above $88,500 on Friday 08:00 UTC, the put expires worthless and you keep the $420. ",
+                                                    "If BTC drops to $85,000, you lose $88,500 \u2212 $85,000 = $3,500, offset by the $420 premium \u2192 net loss $3,080.",
+                                                ], style={"background": "#1a1a2e", "borderRadius": "6px", "padding": "10px 12px", "margin": "8px 0 16px 0", "borderLeft": "3px solid #4ade80"}),
+                                                # ── Short Call ──
+                                                html.H4("Short Call", style={"color": "#f87171", "margin": "0 0 6px 0", "fontSize": "13px"}),
+                                                html.P([
+                                                    "Sell an OTM call at your target delta. You collect premium and profit if the price ",
+                                                    "stays below the strike. ",
+                                                    html.Strong("Risk:"), " theoretically unlimited if the underlying rallies far above the strike.",
+                                                ]),
+                                                html.Div([
+                                                    html.Strong("Example \u2014 ETH Short Call, 20\u0394, monthly:"),
+                                                    html.Br(),
+                                                    "ETH = $3,200. You sell the $3,650 call (20\u0394) for ~$85. ",
+                                                    "ETH finishes at $3,400 \u2192 call expires worthless, you keep $85. ",
+                                                    "ETH rallies to $4,000 \u2192 you owe $4,000 \u2212 $3,650 = $350, minus $85 premium \u2192 net loss $265.",
+                                                ], style={"background": "#1a1a2e", "borderRadius": "6px", "padding": "10px 12px", "margin": "8px 0 16px 0", "borderLeft": "3px solid #f87171"}),
+                                                # ── Short Strangle ──
+                                                html.H4("Short Strangle", style={"color": "#fbbf24", "margin": "0 0 6px 0", "fontSize": "13px"}),
+                                                html.P([
+                                                    "Sell both an OTM put and an OTM call at the same delta. You collect double premium and profit ",
+                                                    "as long as price stays between the two strikes. ",
+                                                    html.Strong("Risk:"), " loss on either side if the underlying makes a large move.",
+                                                ]),
+                                                html.Div([
+                                                    html.Strong("Example \u2014 BTC Short Strangle, 25\u0394, weekly:"),
+                                                    html.Br(),
+                                                    "BTC = $95,000. You sell the $89,000 put (25\u0394) and $101,000 call (25\u0394). ",
+                                                    "Combined premium: ~$1,200. BTC settles at $96,500 \u2192 both expire OTM, you keep $1,200. ",
+                                                    "If BTC drops to $85,000 \u2192 put costs $89,000 \u2212 $85,000 = $4,000, offset by $1,200 \u2192 net loss $2,800.",
+                                                ], style={"background": "#1a1a2e", "borderRadius": "6px", "padding": "10px 12px", "margin": "8px 0 16px 0", "borderLeft": "3px solid #fbbf24"}),
+                                                # ── Iron Condor ──
+                                                html.H4("Iron Condor", style={"color": "#c084fc", "margin": "0 0 6px 0", "fontSize": "13px"}),
+                                                html.P([
+                                                    "A short strangle with protective wings: sell OTM put + call, then buy a further-OTM put + call (5% of spot away from the short strikes). ",
+                                                    "The wings cap your maximum loss but reduce the premium collected. ",
+                                                    html.Strong("Max loss"), " = width of the widest spread minus net credit.",
+                                                ]),
+                                                html.Div([
+                                                    html.Strong("Example \u2014 BTC Iron Condor, 30\u0394, weekly:"),
+                                                    html.Br(),
+                                                    "BTC = $95,000. Wing width = 5% \u00d7 $95,000 = $4,750.", html.Br(),
+                                                    "Sell $87,500 put (30\u0394), buy $82,750 put (wing). Sell $102,500 call (30\u0394), buy $107,250 call (wing).", html.Br(),
+                                                    "Net credit: ~$1,800 (short premiums) \u2212 ~$600 (long premiums) = $1,200.", html.Br(),
+                                                    "Max loss per spread = $4,750 \u2212 $1,200 = $3,550.", html.Br(),
+                                                    "BTC settles at $94,000 \u2192 all legs expire OTM, you keep the $1,200 credit.", html.Br(),
+                                                    "BTC drops to $80,000 \u2192 short put costs $87,500 \u2212 $80,000 = $7,500 but long put pays $82,750 \u2212 $80,000 = $2,750. ",
+                                                    "Net option payout = \u2212$4,750, plus $1,200 credit \u2192 max loss $3,550.",
+                                                ], style={"background": "#1a1a2e", "borderRadius": "6px", "padding": "10px 12px", "margin": "8px 0 16px 0", "borderLeft": "3px solid #c084fc"}),
+                                                # ── Covered Call ──
+                                                html.H4("Covered Call", style={"color": "#38bdf8", "margin": "0 0 6px 0", "fontSize": "13px"}),
+                                                html.P([
+                                                    "Hold 1 unit of the underlying and sell an OTM call against it. The premium provides income and a small downside cushion, ",
+                                                    "but your upside is capped at the strike. ",
+                                                    html.Strong("Best when:"), " you expect sideways-to-slightly-bullish price action.",
+                                                ]),
+                                                html.Div([
+                                                    html.Strong("Example \u2014 BTC Covered Call, 30\u0394, weekly:"),
+                                                    html.Br(),
+                                                    "BTC = $95,000. You hold 1 BTC and sell the $102,500 call (30\u0394) for ~$900.", html.Br(),
+                                                    "BTC settles at $97,000 \u2192 call expires OTM. Underlying PnL = +$2,000, premium = +$900 \u2192 total +$2,900.", html.Br(),
+                                                    "BTC rallies to $108,000 \u2192 underlying +$13,000 but call costs $108,000 \u2212 $102,500 = $5,500. ",
+                                                    "Total = $13,000 \u2212 $5,500 + $900 = +$8,400 (capped vs. $13,000 without the call).", html.Br(),
+                                                    "BTC drops to $90,000 \u2192 underlying \u2212$5,000 + $900 premium \u2192 net \u2212$4,100 (premium softens the loss).",
+                                                ], style={"background": "#1a1a2e", "borderRadius": "6px", "padding": "10px 12px", "margin": "8px 0 16px 0", "borderLeft": "3px solid #38bdf8"}),
+                                                # ── Covered Put ──
+                                                html.H4("Covered Put", style={"color": "#fb923c", "margin": "0 0 6px 0", "fontSize": "13px"}),
+                                                html.P([
+                                                    "Short 1 unit of the underlying and sell an OTM put against it. Mirror image of the covered call \u2014 ",
+                                                    "you profit from declining prices plus premium, but downside (price rallying against your short) is cushioned only by the premium. ",
+                                                    html.Strong("Best when:"), " you expect sideways-to-slightly-bearish price action.",
+                                                ]),
+                                                html.Div([
+                                                    html.Strong("Example \u2014 ETH Covered Put, 25\u0394, monthly:"),
+                                                    html.Br(),
+                                                    "ETH = $3,200. You short 1 ETH and sell the $2,850 put (25\u0394) for ~$70.", html.Br(),
+                                                    "ETH drops to $3,000 \u2192 short underlying +$200, put expires OTM, premium +$70 \u2192 total +$270.", html.Br(),
+                                                    "ETH drops to $2,700 \u2192 short underlying +$500, but put costs $2,850 \u2212 $2,700 = $150. Total = $500 \u2212 $150 + $70 = +$420.", html.Br(),
+                                                    "ETH rallies to $3,600 \u2192 short underlying \u2212$400 + $70 premium \u2192 net \u2212$330.",
+                                                ], style={"background": "#1a1a2e", "borderRadius": "6px", "padding": "10px 12px", "margin": "8px 0 16px 0", "borderLeft": "3px solid #fb923c"}),
+                                                # ── Delta guide ──
+                                                html.Hr(style={"borderColor": "#333", "margin": "16px 0"}),
+                                                html.H4("Choosing Your Delta", style={"color": "#60a5fa", "margin": "0 0 8px 0", "fontSize": "13px"}),
+                                                html.Table(
+                                                    style={"width": "100%", "borderCollapse": "collapse", "fontSize": "12px", "marginBottom": "12px"},
+                                                    children=[
+                                                        html.Thead(html.Tr([
+                                                            html.Th(c, style={"textAlign": "left", "padding": "6px 10px", "borderBottom": "1px solid #444", "color": "#888"})
+                                                            for c in ["Delta", "Approx. OTM %", "Win Prob.", "Premium", "Risk Profile"]
+                                                        ])),
+                                                        html.Tbody([
+                                                            html.Tr([html.Td(c, style={"padding": "5px 10px", "borderBottom": "1px solid #222"}) for c in
+                                                                ["5\u0394", "~15-20%", "~95%", "Very low", "Very safe, minimal income"]]),
+                                                            html.Tr([html.Td(c, style={"padding": "5px 10px", "borderBottom": "1px solid #222"}) for c in
+                                                                ["10\u0394", "~10-15%", "~90%", "Low", "Conservative income"]]),
+                                                            html.Tr([html.Td(c, style={"padding": "5px 10px", "borderBottom": "1px solid #222"}) for c in
+                                                                ["15\u0394", "~7-12%", "~85%", "Moderate", "Balanced risk/reward"]]),
+                                                            html.Tr([html.Td(c, style={"padding": "5px 10px", "borderBottom": "1px solid #222"}) for c in
+                                                                ["20\u0394", "~5-9%", "~80%", "Good", "Higher income, more exposure"]]),
+                                                            html.Tr([html.Td(c, style={"padding": "5px 10px", "borderBottom": "1px solid #222"}) for c in
+                                                                ["25\u0394", "~4-7%", "~75%", "High", "Aggressive income"]]),
+                                                            html.Tr([html.Td(c, style={"padding": "5px 10px", "borderBottom": "1px solid #222"}) for c in
+                                                                ["30\u0394", "~3-5%", "~70%", "Very high", "Aggressive, frequent losses"]]),
+                                                        ]),
+                                                    ],
+                                                ),
+                                                html.P([
+                                                    html.Strong("Tip:"), " In crypto, volatility is high, so even a 10\u0394 option can get breached by sudden moves. ",
+                                                    "Use the backtest to compare different deltas over historical data before committing real capital.",
+                                                ], style={"color": "#888", "fontStyle": "italic"}),
+                                            ],
+                                        ),
+                                    ],
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                    ],
+                ),
                 # ══ PAGE: Data Ops ══
                 html.Div(
                     id="page-ops",
@@ -6335,19 +6680,20 @@ app.layout = html.Div(
 )
 
 # ── Page navigation: toolbar buttons + keyboard shortcuts ──
-_PAGE_IDS = ["market", "strategy", "alerts", "portfolio", "ops"]
+_PAGE_IDS = ["market", "strategy", "alerts", "portfolio", "backtest", "ops"]
 _PAGE_BTN_MAP = {f"tb-{p}": p for p in _PAGE_IDS}
 
 # Single clientside callback handles all 5 buttons → sets active page
 app.clientside_callback(
     """
-    function(n_market, n_strategy, n_alerts, n_portfolio, n_ops, current) {
+    function(n_market, n_strategy, n_alerts, n_portfolio, n_backtest, n_ops, current) {
         var ctx = window.dash_clientside.callback_context;
         if (!ctx.triggered || ctx.triggered.length === 0) return current;
         var tid = ctx.triggered[0].prop_id.split('.')[0];
         var map = {
             'tb-market': 'market', 'tb-strategy': 'strategy',
-            'tb-alerts': 'alerts', 'tb-portfolio': 'portfolio', 'tb-ops': 'ops'
+            'tb-alerts': 'alerts', 'tb-portfolio': 'portfolio',
+            'tb-backtest': 'backtest', 'tb-ops': 'ops'
         };
         return map[tid] || current;
     }
@@ -6362,7 +6708,7 @@ app.clientside_callback(
 app.clientside_callback(
     """
     function(activePage) {
-        var pages = ['market', 'strategy', 'alerts', 'portfolio', 'ops'];
+        var pages = ['market', 'strategy', 'alerts', 'portfolio', 'backtest', 'ops'];
         pages.forEach(function(p) {
             var pg = document.getElementById('page-' + p);
             if (pg) {
@@ -6505,7 +6851,7 @@ app.clientside_callback(
                 var tag = e.target.tagName.toLowerCase();
                 if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
                 if (e.target.isContentEditable) return;
-                var map = {'1': 'market', '2': 'strategy', '3': 'alerts', '4': 'portfolio', '5': 'ops'};
+                var map = {'1': 'market', '2': 'strategy', '3': 'alerts', '4': 'portfolio', '5': 'backtest', '6': 'ops'};
                 var page = map[e.key];
                 if (page) {
                     e.preventDefault();
@@ -8773,5 +9119,393 @@ def export_snapshot_csv(n_clicks, symbol, start_date, end_date):
     return f"Exported {len(df)} rows to {out_path.name}"
 
 
+# ── Options Selling Backtest callback ──────────────────────────────────
+
+def _fmt_money(v, decimals=0):
+    """Format a number as money with sign."""
+    if v >= 0:
+        return f"+${v:,.{decimals}f}" if v > 0 else f"${v:,.{decimals}f}"
+    return f"-${abs(v):,.{decimals}f}"
+
+
+def _build_stat_card(label, value, color="#e0e0e0"):
+    return html.Div(
+        style={
+            "background": "#1a1a2e", "borderRadius": "8px", "padding": "12px 16px",
+            "textAlign": "center", "border": f"1px solid {color}33",
+        },
+        children=[
+            html.Div(label, style={"fontSize": "11px", "color": "#888", "marginBottom": "4px"}),
+            html.Div(value, style={"fontSize": "18px", "fontWeight": "bold", "color": color}),
+        ],
+    )
+
+
+@app.callback(
+    Output("bt-stats-cards", "children"),
+    Output("bt-equity-chart", "figure"),
+    Output("bt-pnl-chart", "figure"),
+    Output("bt-trade-log", "children"),
+    Output("bt-next-trade", "children"),
+    Output("bt-next-trade-store", "data"),
+    Output("bt-status", "children"),
+    Input("bt-run-btn", "n_clicks"),
+    State("bt-symbol", "value"),
+    State("bt-strategy", "value"),
+    State("bt-cycle", "value"),
+    State("bt-delta", "value"),
+    State("bt-days", "value"),
+    State("bt-capital", "value"),
+    State("bt-reinvest", "value"),
+    prevent_initial_call=True,
+)
+def run_backtest_callback(n_clicks, symbol, strategy, cycle, delta, days, capital, reinvest):
+    if not n_clicks:
+        return [], go.Figure(), go.Figure(), [], [], {}, ""
+
+    symbol = str(symbol or "BTC").upper()
+    strategy = str(strategy or "short_put")
+    cycle = str(cycle or "weekly")
+    delta = float(delta or 0.15)
+    days = int(days or 365)
+    capital = float(capital or 100000)
+
+    reinvest_on = bool(reinvest and "yes" in reinvest)
+
+    try:
+        result = run_options_backtest(
+            symbol=symbol,
+            strategy=strategy,
+            cycle=cycle,
+            target_delta=delta,
+            capital=capital,
+            days=days,
+            reinvest=reinvest_on,
+        )
+    except Exception as exc:
+        return [], go.Figure(), go.Figure(), [], [], {}, f"Error: {exc}"
+
+    if result.total_trades == 0:
+        return [], go.Figure(), go.Figure(), [], [], {}, "No trades generated. Try a longer lookback or different settings."
+
+    strategy_labels = {
+        "short_put": "Short Put", "cash_secured_put": "Cash-Secured Put",
+        "short_call": "Short Call",
+        "short_strangle": "Short Strangle", "iron_condor": "Iron Condor",
+        "covered_call": "Covered Call", "covered_put": "Covered Put",
+    }
+    strat_label = strategy_labels.get(strategy, strategy)
+
+    # Stats cards
+    pnl_color = "#4ade80" if result.total_pnl >= 0 else "#f87171"
+    cards = html.Div(
+        style={"display": "grid", "gridTemplateColumns": "repeat(8, 1fr)", "gap": "10px"},
+        children=[
+            _build_stat_card("Total Trades", str(result.total_trades)),
+            _build_stat_card("Win Rate", f"{result.win_rate:.1%}", "#4ade80" if result.win_rate >= 0.5 else "#f87171"),
+            _build_stat_card("Total PnL", _fmt_money(result.total_pnl), pnl_color),
+            _build_stat_card("Avg PnL / Trade", _fmt_money(result.avg_pnl), "#4ade80" if result.avg_pnl >= 0 else "#f87171"),
+            _build_stat_card("Avg Premium", f"${result.avg_premium:,.0f}", "#60a5fa"),
+            _build_stat_card("Max Win", _fmt_money(result.max_win), "#4ade80"),
+            _build_stat_card("Max Loss", _fmt_money(result.max_loss), "#f87171"),
+            _build_stat_card("Sharpe", f"{result.sharpe:.2f}", "#c084fc"),
+        ],
+    )
+
+    # Equity curve
+    eq_fig = go.Figure()
+    eq_dates = result.dates + ([result.trades[-1]["expiry_date"]] if result.trades else [])
+    eq_fig.add_trace(go.Scatter(
+        x=eq_dates,
+        y=result.equity_curve,
+        mode="lines",
+        fill="tozeroy",
+        line=dict(color="#60a5fa", width=2),
+        fillcolor="rgba(96,165,250,0.1)",
+        name="Equity",
+    ))
+    eq_fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#0d0d1a",
+        plot_bgcolor="#0d0d1a",
+        title=dict(text=f"{symbol} {strat_label} ({cycle}, {delta:.0%}\u0394{'', ' \u2022 Reinvested'}[reinvest_on]) \u2014 Equity Curve", font=dict(size=14)),
+        xaxis=dict(title="Date", gridcolor="#222"),
+        yaxis=dict(title="Equity ($)", gridcolor="#222", tickformat="$,.0f"),
+        margin=dict(l=60, r=20, t=40, b=40),
+        height=350,
+    )
+    # Draw the starting capital line
+    eq_fig.add_hline(y=capital, line_dash="dash", line_color="#555", annotation_text=f"Start ${capital:,.0f}")
+    # Max drawdown annotation
+    if result.max_drawdown > 0:
+        eq_fig.add_annotation(
+            x=eq_dates[-1], y=min(result.equity_curve),
+            text=f"Max DD: {result.max_drawdown:.2%}",
+            showarrow=False, font=dict(color="#f87171", size=11),
+            yshift=-15,
+        )
+
+    # PnL per trade bar chart
+    pnl_fig = go.Figure()
+    trade_pnls = [t["pnl"] for t in result.trades]
+    trade_dates = [t["entry_date"] for t in result.trades]
+    colors = ["#4ade80" if p >= 0 else "#f87171" for p in trade_pnls]
+    pnl_fig.add_trace(go.Bar(
+        x=trade_dates,
+        y=trade_pnls,
+        marker_color=colors,
+        name="PnL",
+    ))
+    pnl_fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#0d0d1a",
+        plot_bgcolor="#0d0d1a",
+        title=dict(text="PnL Per Trade", font=dict(size=14)),
+        xaxis=dict(title="Entry Date", gridcolor="#222"),
+        yaxis=dict(title="PnL ($)", gridcolor="#222", tickformat="$,.0f"),
+        margin=dict(l=60, r=20, t=40, b=40),
+        height=300,
+    )
+    pnl_fig.add_hline(y=0, line_color="#555")
+
+    # Trade log table
+    header_style = {"background": "#1a1a2e", "color": "#888", "padding": "8px 10px", "fontSize": "11px", "textAlign": "left", "borderBottom": "1px solid #333"}
+    cell_style = {"padding": "6px 10px", "fontSize": "12px", "borderBottom": "1px solid #1a1a2e"}
+
+    header_cols = ["Entry", "Expiry", "Spot", "Settlement"]
+    if strategy in ("short_put", "cash_secured_put", "short_strangle", "iron_condor", "covered_put"):
+        header_cols.append("Put K")
+    if strategy in ("short_call", "short_strangle", "iron_condor", "covered_call"):
+        header_cols.append("Call K")
+    if strategy == "iron_condor":
+        header_cols += ["Long Put K", "Long Call K"]
+    header_cols += ["Size", "Contracts", "Premium", "PnL", "W/L"]
+
+    table_header = html.Tr([html.Th(c, style=header_style) for c in header_cols])
+    table_rows = []
+    for t in reversed(result.trades):  # newest first
+        pnl_c = "#4ade80" if t["pnl"] >= 0 else "#f87171"
+        cells = [
+            html.Td(t["entry_date"], style=cell_style),
+            html.Td(t["expiry_date"], style=cell_style),
+            html.Td(f"${t['spot']:,.0f}", style=cell_style),
+            html.Td(f"${t['settlement']:,.0f}", style=cell_style),
+        ]
+        if strategy in ("short_put", "cash_secured_put", "short_strangle", "iron_condor", "covered_put"):
+            cells.append(html.Td(f"${t.get('put_strike', 0):,.0f}", style=cell_style))
+        if strategy in ("short_call", "short_strangle", "iron_condor", "covered_call"):
+            cells.append(html.Td(f"${t.get('call_strike', 0):,.0f}", style=cell_style))
+        if strategy == "iron_condor":
+            cells.append(html.Td(f"${t.get('long_put_strike', 0):,.0f}", style=cell_style))
+            cells.append(html.Td(f"${t.get('long_call_strike', 0):,.0f}", style=cell_style))
+        cells += [
+            html.Td(f"${t.get('position_size', 0):,.0f}", style=cell_style),
+            html.Td(f"{t.get('contracts', 0):,.4f}", style=cell_style),
+            html.Td(f"${t['premium']:,.0f}", style=cell_style),
+            html.Td(f"${t['pnl']:,.0f}", style={**cell_style, "color": pnl_c, "fontWeight": "bold"}),
+            html.Td("W" if t["won"] else "L", style={**cell_style, "color": pnl_c}),
+        ]
+        table_rows.append(html.Tr(cells))
+
+    trade_table = html.Table(
+        [html.Thead(table_header), html.Tbody(table_rows)],
+        style={"width": "100%", "borderCollapse": "collapse", "fontSize": "12px"},
+    )
+
+    # Build "Next Trade Idea" card using live spot + RV, reinvested equity if enabled.
+    try:
+        next_equity = result.equity_curve[-1] if (reinvest_on and result.equity_curve) else None
+        suggestion = suggest_next_trade(
+            symbol=symbol,
+            strategy=strategy,
+            cycle=cycle,
+            target_delta=delta,
+            capital=capital,
+            reinvest_equity=next_equity,
+        )
+    except Exception as exc:
+        suggestion = {"ok": False, "reason": f"{exc}"}
+    next_card = _build_next_trade_card(suggestion, strat_label)
+
+    reinvest_tag = " | Reinvested" if reinvest_on else ""
+    status = f"{strat_label} on {symbol} ({cycle}, {delta:.0%}\u0394{reinvest_tag}) \u2014 {result.total_trades} trades over {days}d"
+    store_payload = suggestion if isinstance(suggestion, dict) and suggestion.get("ok") else {}
+    return cards, eq_fig, pnl_fig, trade_table, next_card, store_payload, status
+
+
+def _build_next_trade_card(s: dict, strat_label: str):
+    card_bg = "#0f1628"
+    border = "1px solid #2a3150"
+    label_style = {"color": "#7d8597", "fontSize": "11px", "textTransform": "uppercase", "letterSpacing": "0.5px"}
+    value_style = {"color": "#e5e7eb", "fontSize": "14px", "fontWeight": "600", "marginTop": "2px"}
+    pair_style = {"display": "flex", "flexDirection": "column", "padding": "8px 12px"}
+
+    if not s or not s.get("ok"):
+        return html.Div(
+            [
+                html.Div("Next Trade Idea", style={"fontSize": "13px", "fontWeight": "bold", "color": "#c084fc", "marginBottom": "6px"}),
+                html.Div(s.get("reason", "Unavailable") if isinstance(s, dict) else "Unavailable",
+                         style={"color": "#f87171", "fontSize": "12px"}),
+            ],
+            style={"padding": "12px 14px", "background": card_bg, "border": border, "borderRadius": "6px"},
+        )
+
+    expiry_suffix = "" if s.get("listed_expiry", False) else " (theoretical)"
+    pairs = [
+        ("Entry", s["entry_date"]),
+        ("Expiry", f"{s['expiry_date']} ({s['days_to_expiry']}d){expiry_suffix}"),
+        ("Spot", f"${s['spot']:,.0f}"),
+        ("IV used", f"{s['iv'] * 100:.1f}%"),
+    ]
+    if s.get("put_strike") is not None:
+        pairs.append(("Put K", f"${s['put_strike']:,.0f} (Δ {s.get('put_delta', 0):.2f})"))
+    if s.get("put_instrument"):
+        pairs.append(("Put inst.", s["put_instrument"]))
+    if s.get("call_strike") is not None:
+        pairs.append(("Call K", f"${s['call_strike']:,.0f} (Δ {s.get('call_delta', 0):.2f})"))
+    if s.get("call_instrument"):
+        pairs.append(("Call inst.", s["call_instrument"]))
+    if s.get("long_put_strike") is not None:
+        pairs.append(("Long Put K", f"${s['long_put_strike']:,.0f}"))
+    if s.get("long_put_instrument"):
+        pairs.append(("Long put inst.", s["long_put_instrument"]))
+    if s.get("long_call_strike") is not None:
+        pairs.append(("Long Call K", f"${s['long_call_strike']:,.0f}"))
+    if s.get("long_call_instrument"):
+        pairs.append(("Long call inst.", s["long_call_instrument"]))
+
+    pairs += [
+        ("Contracts", f"{s['contracts']:.4f}"),
+        ("Size deployed", f"${s['position_size']:,.0f}"),
+        ("Premium est.", f"${s['expected_premium']:,.0f}"),
+        ("Max loss", "uncapped" if s.get("max_loss") is None else f"${s['max_loss']:,.0f}"),
+    ]
+
+    if not s.get("tradeable", True):
+        pairs.append(("Warning", s.get("reason", "not tradeable")))
+
+    grid = html.Div(
+        [
+            html.Div([
+                html.Div(label, style=label_style),
+                html.Div(value, style=value_style),
+            ], style=pair_style)
+            for label, value in pairs
+        ],
+        style={"display": "grid", "gridTemplateColumns": "repeat(auto-fill, minmax(160px, 1fr))", "gap": "4px"},
+    )
+
+    send_btn = html.Button(
+        "Send to Suite",
+        id="bt-send-to-suite-btn",
+        n_clicks=0,
+        className="action-button",
+        disabled=not s.get("tradeable", True),
+        style={"marginTop": "10px"},
+    )
+    send_status = html.Div(
+        id="bt-send-to-suite-status",
+        style={"fontSize": "11px", "color": "#7d8597", "marginTop": "6px"},
+    )
+
+    return html.Div(
+        [
+            html.Div(
+                f"Next Trade Idea \u2014 {strat_label}",
+                style={"fontSize": "13px", "fontWeight": "bold", "color": "#c084fc", "marginBottom": "6px"},
+            ),
+            html.Div(
+                "Based on live Deribit spot + realised-vol premium bump; sized by exchange increments.",
+                style={"fontSize": "11px", "color": "#7d8597", "marginBottom": "8px"},
+            ),
+            grid,
+            send_btn,
+            send_status,
+        ],
+        style={"padding": "12px 14px", "background": card_bg, "border": border, "borderRadius": "6px"},
+    )
+
+
+def _suggestion_to_legs(s: dict) -> list:
+    strategy = str(s.get("strategy") or "").lower()
+    expiry = s.get("expiry_date")
+    qty = float(s.get("contracts") or 0.0)
+    legs: list = []
+
+    def _leg(row_id: int, action: str, leg_type: str, strike):
+        return {
+            "row_id": row_id,
+            "enabled": True,
+            "action": action,
+            "type": leg_type,
+            "expiry": expiry,
+            "strike": float(strike) if strike is not None else None,
+            "quantity": qty,
+        }
+
+    if strategy in ("short_put", "cash_secured_put"):
+        legs.append(_leg(1, "sell", "put", s.get("put_strike")))
+    elif strategy == "short_call":
+        legs.append(_leg(1, "sell", "call", s.get("call_strike")))
+    elif strategy == "short_strangle":
+        legs.append(_leg(1, "sell", "put", s.get("put_strike")))
+        legs.append(_leg(2, "sell", "call", s.get("call_strike")))
+    elif strategy == "iron_condor":
+        legs.append(_leg(1, "sell", "put", s.get("put_strike")))
+        legs.append(_leg(2, "buy", "put", s.get("long_put_strike")))
+        legs.append(_leg(3, "sell", "call", s.get("call_strike")))
+        legs.append(_leg(4, "buy", "call", s.get("long_call_strike")))
+    return legs
+
+
+_SUGGESTION_TEMPLATE_MAP = {
+    "short_put": "short_put",
+    "cash_secured_put": "short_put",
+    "short_call": "short_call",
+    "short_strangle": "short_strangle",
+    "iron_condor": "iron_condor",
+}
+
+
+@app.callback(
+    Output("bt-send-to-suite-status", "children"),
+    Input("bt-send-to-suite-btn", "n_clicks"),
+    State("bt-next-trade-store", "data"),
+    prevent_initial_call=True,
+)
+def send_idea_to_suite(n_clicks, suggestion):
+    if not n_clicks:
+        return ""
+    if not isinstance(suggestion, dict) or not suggestion.get("ok"):
+        return "No trade idea available to send."
+    if not suggestion.get("tradeable", True):
+        return "Idea is not tradeable — nothing sent."
+
+    legs = _suggestion_to_legs(suggestion)
+    if not legs:
+        return f"Unsupported strategy: {suggestion.get('strategy')}"
+
+    symbol = str(suggestion.get("symbol") or "BTC").upper()
+    strategy = str(suggestion.get("strategy") or "short_put").lower()
+    template = _SUGGESTION_TEMPLATE_MAP.get(strategy, "custom")
+    entry = suggestion.get("entry_date") or pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
+    expiry = suggestion.get("expiry_date") or ""
+    name = f"BT {symbol} {strategy} {entry}->{expiry}".strip()
+
+    record = {
+        "symbol": symbol,
+        "template": template,
+        "commission": float(DEFAULT_COMMISSION_PER_CONTRACT),
+        "eval_days": float(suggestion.get("days_to_expiry") or 7),
+        "name": name,
+        "legs": legs,
+    }
+    try:
+        save_strategy(STRATEGY_SUITE_SAVE_PATH, record)
+    except Exception as exc:
+        return f"Save failed: {exc}"
+    return f"Sent to Suite as '{name}'."
+
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=8050, debug=True)

@@ -10,6 +10,7 @@ Starts:
 from __future__ import annotations
 
 import argparse
+import socket
 import subprocess
 import threading
 import time
@@ -91,7 +92,11 @@ def _start_telegram_bot(skip: bool) -> subprocess.Popen | None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Launch GEX dashboard + auto collector")
-    parser.add_argument("--host", default="127.0.0.1", help="Dash host (default: 127.0.0.1)")
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Dash host (default: 0.0.0.0 — reachable from LAN; use 127.0.0.1 for local-only)",
+    )
     parser.add_argument("--port", type=int, default=8050, help="Dash port (default: 8050)")
     parser.add_argument(
         "--collector-interval",
@@ -145,13 +150,27 @@ def main() -> None:
     from app import app
 
     url = f"http://{args.host}:{args.port}"
+    local_url = f"http://127.0.0.1:{args.port}"
+    lan_url: str | None = None
+    if args.host in ("0.0.0.0", ""):
+        try:
+            lan_ip = socket.gethostbyname(socket.gethostname())
+            lan_url = f"http://{lan_ip}:{args.port}"
+        except Exception:  # pragma: no cover - best effort
+            lan_url = None
+
     if args.open_browser:
         try:
-            webbrowser.open(url)
+            webbrowser.open(lan_url or local_url)
         except Exception:  # pragma: no cover - best effort
             pass
 
     print(f"[launcher] Dashboard running at {url}")
+    print(f"[launcher]   local:   {local_url}")
+    if lan_url:
+        print(f"[launcher]   network: {lan_url}")
+        print("[launcher] Note: allow Python through Windows Firewall on port "
+              f"{args.port} for other devices to connect")
     print("[launcher] Press Ctrl+C to stop")
     try:
         app.run(host=args.host, port=int(args.port), debug=False)
